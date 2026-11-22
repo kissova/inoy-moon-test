@@ -12,6 +12,9 @@ jobs:
     name: Compile Dylib
     runs-on: ubuntu-latest
 
+    env:
+      THEOS: /opt/theos
+
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
@@ -22,8 +25,6 @@ jobs:
         sudo apt-get install -y make git curl xz-utils unzip zstd file python3 perl rsync zip tar fakeroot dpkg ca-certificates jq build-essential clang lld llvm
 
     - name: Setup Theos
-      env:
-        THEOS: /opt/theos
       run: |
         if [ ! -d "$THEOS/makefiles" ]; then
           sudo git clone --recursive https://github.com/theos/theos.git "$THEOS"
@@ -44,8 +45,6 @@ jobs:
         ls -la "$THEOS/sdks"
 
     - name: Setup Toolchain & Linker
-      env:
-        THEOS: /opt/theos
       run: |
         mkdir -p "$THEOS/toolchain/linux/iphone/bin"
         
@@ -73,7 +72,7 @@ jobs:
           exit 1
         fi
         
-        LD_WRAPPER="/opt/theos/toolchain/linux/iphone/bin/ld"
+        LD_WRAPPER="$THEOS/toolchain/linux/iphone/bin/ld"
         sudo rm -f "$LD_WRAPPER"
         {
           echo '#!/usr/bin/env bash'
@@ -118,8 +117,6 @@ jobs:
         sudo cp ./ldid "$THEOS/toolchain/linux/iphone/bin/ldid" || true
 
     - name: Build Tweak
-      env:
-        THEOS: /opt/theos
       run: |
         export PATH="$THEOS/toolchain/linux/iphone/bin:/usr/local/bin:$PATH"
         make clean
