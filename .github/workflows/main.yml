@@ -1,0 +1,72 @@
+name: Build dylib
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Build dylib
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p build/obj
+
+          INCLUDES="-IESP -IESP/imgui -IESP/KittyMemory -IESP/KittyMemory/dobby \
+            -IESP/FPS -IESP/Hide -IESP/API -IESP/JRMemory.framework/Headers \
+            -IMenu -IMenu/XC6 -ICustomView"
+
+          COMMON="-arch arm64 -isysroot $SDK -miphoneos-version-min=14.0 \
+            -fobjc-arc -fno-modules -w -O2 $INCLUDES"
+
+          # .xm (Logos) fayllar Theos teləb edir, ona görə çıxarılır.
+          # BLOCK qovluğu ayrıca app layihəsidir, ona görə çıxarılır.
+          FILES=$(find ESP Menu CustomView \
+            \( -name "*.m" -o -name "*.mm" -o -name "*.cpp" \) \
+            -not -path "ESP/BLOCK/*" \
+            -not -name "*Zone.Identifier*" \
+            -not -name "imgui_demo.cpp")
+
+          OBJS=""
+          i=0
+          for f in $FILES; do
+            i=$((i+1))
+            o="build/obj/$i.o"
+            case "$f" in
+              *.cpp) xcrun --sdk iphoneos clang++ $COMMON -std=c++17 -c "$f" -o "$o" ;;
+              *.mm)  xcrun --sdk iphoneos clang++ $COMMON -std=c++17 -c "$f" -o "$o" ;;
+              *.m)   xcrun --sdk iphoneos clang   $COMMON -c "$f" -o "$o" ;;
+            esac
+            OBJS="$OBJS $o"
+          done
+
+          xcrun --sdk iphoneos clang++ -dynamiclib \
+            -arch arm64 -isysroot $SDK -miphoneos-version-min=14.0 \
+            -install_name @executable_path/Frameworks/ESP.dylib \
+            $OBJS \
+            -LESP/lib -LESP/API \
+            ESP/lib/libdobby.a ESP/lib/libcrypto.a ESP/lib/libssl.a ESP/API/libAPIClient.a \
+            -framework Foundation -framework UIKit -framework Metal \
+            -framework MetalKit -framework QuartzCore -framework CoreGraphics \
+            -framework Security -framework CoreText -framework AudioToolbox \
+            -lc++ -lz \
+            -o build/ESP.dylib
+
+          ldid -S build/ESP.dylib
+          file build/ESP.dylib
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP-dylib
+          path: build/ESP.dylib
