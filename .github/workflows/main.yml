@@ -1,72 +1,138 @@
-name: Build dylib
+name: Build Tweak Dylib
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Əl ilə işə salmaq üçün
 
 jobs:
   build:
-    runs-on: macos-14
+    name: Compile Dylib
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-      - name: Install ldid
-        run: brew install ldid
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y make git curl xz-utils unzip zstd file python3 perl rsync zip tar fakeroot dpkg ca-certificates jq build-essential clang lld llvm
 
-      - name: Build dylib
-        run: |
-          set -e
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          mkdir -p build/obj
+    - name: Setup Theos
+      env:
+        THEOS: /opt/theos
+      run: |
+        if [ ! -d "$THEOS/makefiles" ]; then
+          sudo git clone --recursive https://github.com/theos/theos.git "$THEOS"
+        fi
+        
+        sudo mkdir -p "$THEOS/sdks"
+        if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
+          curl -fSL "https://github.com/theos/sdks/archive/refs/heads/master.zip" -o /tmp/theos_sdks.zip || true
+          if [ -s /tmp/theos_sdks.zip ]; then
+            unzip -q /tmp/theos_sdks.zip -d /tmp/theos_sdks_ext
+            SDK_DIR=$(find /tmp/theos_sdks_ext -maxdepth 3 -type d -name "iPhoneOS*.sdk" | sort -V | tail -n 1 || true)
+            if [ -n "$SDK_DIR" ]; then
+              sudo cp -r "$SDK_DIR" "$THEOS/sdks/"
+            fi
+          fi
+          rm -rf /tmp/theos_sdks.zip /tmp/theos_sdks_ext
+        fi
+        ls -la "$THEOS/sdks"
 
-          INCLUDES="-IESP -IESP/imgui -IESP/KittyMemory -IESP/KittyMemory/dobby \
-            -IESP/FPS -IESP/Hide -IESP/API -IESP/JRMemory.framework/Headers \
-            -IMenu -IMenu/XC6 -ICustomView"
+    - name: Setup Toolchain & Linker
+      env:
+        THEOS: /opt/theos
+      run: |
+        mkdir -p "$THEOS/toolchain/linux/iphone/bin"
+        
+        CLANG_BIN=$(find /usr/bin -name 'clang-[0-9]*' -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
+        [ -z "$CLANG_BIN" ] && CLANG_BIN=$(command -v clang || true)
+        CLANGXX_BIN=$(find /usr/bin -name 'clang++-[0-9]*' -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
+        [ -z "$CLANGXX_BIN" ] && CLANGXX_BIN=$(command -v clang++ || true)
+        
+        sudo ln -sf "$CLANG_BIN" "$THEOS/toolchain/linux/iphone/bin/clang"
+        sudo ln -sf "$CLANGXX_BIN" "$THEOS/toolchain/linux/iphone/bin/clang++"
+        sudo ln -sf "$CLANG_BIN" /usr/local/bin/clang
+        sudo ln -sf "$CLANGXX_BIN" /usr/local/bin/clang++
+        
+        LD64_BIN=$(find /usr/bin /usr/lib -name 'ld64.lld*' -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
+        LLD_BIN=$(find /usr/bin /usr/lib -name 'lld*' -type f -executable 2>/dev/null | grep -v 'ld64' | sort -V | tail -n 1 || true)
+        
+        if [ -n "$LD64_BIN" ]; then
+          RESOLVED_LD="$LD64_BIN"
+          NEED_DARWIN_FLAVOR="0"
+        elif [ -n "$LLD_BIN" ]; then
+          RESOLVED_LD="$LLD_BIN"
+          NEED_DARWIN_FLAVOR="1"
+        else
+          echo "XETA: ld64.lld ve ya lld tapilmadi."
+          exit 1
+        fi
+        
+        LD_WRAPPER="/opt/theos/toolchain/linux/iphone/bin/ld"
+        sudo rm -f "$LD_WRAPPER"
+        {
+          echo '#!/usr/bin/env bash'
+          echo 'ARGS=()'
+          echo 'HAS_PLAT=0'
+          echo 'MIN_VER="14.0"'
+          echo 'SDK_VER="16.5"'
+          echo 'while [ $# -gt 0 ]; do'
+          echo '  case "$1" in'
+          echo '    -platform_version) HAS_PLAT=1; ARGS+=("$1") ;;'
+          echo '    -iphoneos_version_min) shift; [ $# -gt 0 ] && MIN_VER="$1" ;;'
+          echo '    -sdk_version) shift; [ $# -gt 0 ] && SDK_VER="$1" ;;'
+          echo '    *) ARGS+=("$1") ;;'
+          echo '  esac'
+          echo '  shift'
+          echo 'done'
+          echo 'if [ "$HAS_PLAT" -eq 0 ]; then'
+          echo '  ARGS+=(-platform_version ios "$MIN_VER" "$SDK_VER")'
+          echo 'fi'
+          if [ "$NEED_DARWIN_FLAVOR" = "1" ]; then
+            echo "exec \"$RESOLVED_LD\" -flavor darwin \"\${ARGS[@]}\""
+          else
+            echo "exec \"$RESOLVED_LD\" \"\${ARGS[@]}\""
+          fi
+        } | sudo tee "$LD_WRAPPER" >/dev/null
+        sudo chmod +x "$LD_WRAPPER"
+        
+        STRIP_BIN=$(find /usr/bin /usr/lib /usr/lib/llvm* -name 'llvm-strip*' -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
+        if [ -n "$STRIP_BIN" ]; then
+          sudo ln -sf "$STRIP_BIN" "$THEOS/toolchain/linux/iphone/bin/strip"
+          sudo ln -sf "$STRIP_BIN" "/usr/local/bin/strip"
+        fi
 
-          COMMON="-arch arm64 -isysroot $SDK -miphoneos-version-min=14.0 \
-            -fobjc-arc -fno-modules -w -O2 $INCLUDES"
+    - name: Install ldid
+      run: |
+        sudo apt-get install -y libssl-dev libplist-dev
+        git clone https://github.com/ProcursusTeam/ldid.git /tmp/ldid
+        cd /tmp/ldid
+        git submodule update --init
+        make CXXFLAGS="-std=c++17 -include cstdint"
+        sudo cp ./ldid /usr/local/bin/ldid
+        sudo cp ./ldid "$THEOS/toolchain/linux/iphone/bin/ldid" || true
 
-          # .xm (Logos) fayllar Theos teləb edir, ona görə çıxarılır.
-          # BLOCK qovluğu ayrıca app layihəsidir, ona görə çıxarılır.
-          FILES=$(find ESP Menu CustomView \
-            \( -name "*.m" -o -name "*.mm" -o -name "*.cpp" \) \
-            -not -path "ESP/BLOCK/*" \
-            -not -name "*Zone.Identifier*" \
-            -not -name "imgui_demo.cpp")
+    - name: Build Tweak
+      env:
+        THEOS: /opt/theos
+      run: |
+        export PATH="$THEOS/toolchain/linux/iphone/bin:/usr/local/bin:$PATH"
+        make clean
+        make package FINALPACKAGE=1 || make
 
-          OBJS=""
-          i=0
-          for f in $FILES; do
-            i=$((i+1))
-            o="build/obj/$i.o"
-            case "$f" in
-              *.cpp) xcrun --sdk iphoneos clang++ $COMMON -std=c++17 -c "$f" -o "$o" ;;
-              *.mm)  xcrun --sdk iphoneos clang++ $COMMON -std=c++17 -c "$f" -o "$o" ;;
-              *.m)   xcrun --sdk iphoneos clang   $COMMON -c "$f" -o "$o" ;;
-            esac
-            OBJS="$OBJS $o"
-          done
+    - name: Collect Outputs
+      run: |
+        mkdir -p compiled_output
+        find . -maxdepth 4 -type f \( -name "*.deb" -o -name "*.dylib" \) ! -path "./compiled_output/*" -exec cp -v {} compiled_output/ \;
+        ls -lh compiled_output/
 
-          xcrun --sdk iphoneos clang++ -dynamiclib \
-            -arch arm64 -isysroot $SDK -miphoneos-version-min=14.0 \
-            -install_name @executable_path/Frameworks/ESP.dylib \
-            $OBJS \
-            -LESP/lib -LESP/API \
-            ESP/lib/libdobby.a ESP/lib/libcrypto.a ESP/lib/libssl.a ESP/API/libAPIClient.a \
-            -framework Foundation -framework UIKit -framework Metal \
-            -framework MetalKit -framework QuartzCore -framework CoreGraphics \
-            -framework Security -framework CoreText -framework AudioToolbox \
-            -lc++ -lz \
-            -o build/ESP.dylib
-
-          ldid -S build/ESP.dylib
-          file build/ESP.dylib
-
-      - name: Upload dylib
-        uses: actions/upload-artifact@v4
-        with:
-          name: ESP-dylib
-          path: build/ESP.dylib
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Tweak-Compiled-Output
+        path: compiled_output/
